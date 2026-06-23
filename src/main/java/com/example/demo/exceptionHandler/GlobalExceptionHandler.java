@@ -1,7 +1,9 @@
 package com.example.demo.exceptionHandler;
 
 
+import com.example.demo.exception.FileNotFoundException;
 import com.example.demo.exception.InvalidCredentialsException;
+import com.example.demo.exception.InvalidFileException;
 import com.example.demo.exception.UserAlreadyExistsException;
 import com.example.demo.response.AuthResponse;
 import lombok.extern.slf4j.Slf4j;
@@ -29,6 +31,19 @@ public class GlobalExceptionHandler {
 
         return new ResponseEntity<>(new AuthResponse(ex.getMessage()), HttpStatus.UNAUTHORIZED);
     }
+
+    @ExceptionHandler(FileNotFoundException.class)
+    public ResponseEntity<AuthResponse> handleFileNotFoundException(FileNotFoundException ex) {
+        log.warn("File not found: {}", ex.getMessage());
+        return new ResponseEntity<>(new AuthResponse(ex.getMessage()), HttpStatus.NOT_FOUND);
+    }
+
+    @ExceptionHandler(InvalidFileException.class)
+    public ResponseEntity<AuthResponse> handleInvalidFileException(InvalidFileException ex) {
+        log.warn("Invalid file: {}", ex.getMessage());
+        return new ResponseEntity<>(new AuthResponse(ex.getMessage()), HttpStatus.BAD_REQUEST);
+    }
+
     @ExceptionHandler(RuntimeException.class)
     public ResponseEntity<AuthResponse> handleRuntimeException(RuntimeException ex) {
 
