@@ -8,6 +8,7 @@ import com.example.demo.entities.UploadSession;
 import com.example.demo.entities.User;
 import com.example.demo.enums.UploadStatus;
 import com.example.demo.exception.FileNotFoundException;
+import com.example.demo.exception.InvalidFileException;
 import com.example.demo.repositories.FileRepository;
 import com.example.demo.repositories.UploadSessionRepository;
 import com.example.demo.repositories.UserRepository;
@@ -27,7 +28,9 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.List;
 import java.util.UUID;
-
+import com.example.demo.DTOs.DownloadInfoResponseDTO;
+import com.example.demo.exception.InvalidFileException;
+import org.springframework.http.MediaType;
 @Slf4j
 @Service
 public class FileService {
@@ -123,7 +126,8 @@ private UploadSessionRepository repository;
         metadata.setId(UUID.randomUUID());
         metadata.setUser(userRepository.getReferenceById(session.getUserId()));
         metadata.setOriginalFileName(session.getFileName());
-        metadata.setStoragePath(finalFile.toString());
+        metadata.setStoragePath("users/" + session.getUserId() + "/" + session.getFileName());
+//        metadata.setStoragePath(finalFile.toString());
         metadata.setSizeBytes(Files.size(finalFile));
 
         fileRepository.save(metadata);
@@ -186,6 +190,60 @@ private UploadSessionRepository repository;
         localFileStorageService.delete(metadata.getStoragePath());
         fileRepository.delete(metadata);
         log.info("File deleted. userId={} fileId={}", metadata.getUser().getId(), fileId);
+    }
+
+    public DownloadInfoResponseDTO getDownloadInfo(UUID fileId) {
+        FileMetadata metadata = getOwnedFile(fileId);
+
+        String contentType = metadata.getContentType();
+        if (contentType == null || contentType.isBlank()) {
+            contentType = MediaType.APPLICATION_OCTET_STREAM_VALUE;
+        }
+
+        return DownloadInfoResponseDTO.builder()
+                .fileId(metadata.getId())
+                .fileName(metadata.getOriginalFileName())
+                .contentType(contentType)
+                .sizeBytes(metadata.getSizeBytes())
+                .build();
+    }
+
+    public byte[] downloadChunk(UUID fileId, int chunkNumber, int chunkSize) throws IOException {
+        if (chunkNumber < 1) {
+            throw new InvalidFileException("chunkNumber must be >= 1");
+        }
+        if (chunkSize < 1) {
+            throw new InvalidFileException("chunkSize must be >= 1");
+        }
+
+        FileMetadata metadata = getOwnedFile(fileId);
+        long fileSize = metadata.getSizeBytes();
+
+        if (fileSize == 0) {
+            throw new InvalidFileException("File is empty");
+        }
+
+        int totalChunks = (int) Math.ceil((double) fileSize / chunkSize);
+
+        if (chunkNumber > totalChunks) {
+            throw new InvalidFileException("chunkNumber exceeds total chunks: " + totalChunks);
+        }
+
+        long offset = (long) (chunkNumber - 1) * chunkSize;
+        int length = (int) Math.min(chunkSize, fileSize - offset);
+
+        return localFileStorageService.readChunk(metadata.getStoragePath(), offset, length);
+    }
+
+    public int getTotalDownloadChunks(UUID fileId, int chunkSize) {
+        FileMetadata metadata = getOwnedFile(fileId);
+        long fileSize = metadata.getSizeBytes();
+
+        if (fileSize == 0) {
+            return 0;
+        }
+
+        return (int) Math.ceil((double) fileSize / chunkSize);
     }
 
     private FileMetadata getOwnedFile(UUID fileId) {
