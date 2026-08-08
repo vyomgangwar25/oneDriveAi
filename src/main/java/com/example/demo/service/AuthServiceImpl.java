@@ -44,7 +44,7 @@ public class AuthServiceImpl implements AuthService {
         }
         // 2. Create User entity
         User user = new User();
-
+        user.setUsername(signupRequest.getUsername());
         user.setEmail(signupRequest.getEmail());
         user.setRole(Role.USER);
 
