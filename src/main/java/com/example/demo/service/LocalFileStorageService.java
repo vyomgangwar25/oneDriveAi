@@ -11,6 +11,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Locale;
 import java.util.Set;
 import java.util.UUID;
 
@@ -36,20 +37,55 @@ public class LocalFileStorageService {
     public String store(Long userId, UUID fileId, MultipartFile file) throws IOException {
         validateFile(file);
 
-        String sanitizedName = sanitizeFilename(file.getOriginalFilename());
+        Path target = resolveStoredFile(userId, fileId, file.getOriginalFilename());
+
+        file.transferTo(target);
+
+        return toStoragePath(target);
+    }
+
+    /**
+     * Resolves where a file is stored on disk.
+     *
+     * The fileId prefix is what keeps two uploads of the same name apart, so
+     * neither overwrites the other and neither collides on the unique
+     * storage_path column.
+     */
+    public Path resolveStoredFile(Long userId, UUID fileId, String fileName) throws IOException {
+        return resolveUserFile(userId, fileId + "_" + sanitizeFilename(fileName));
+    }
+
+    /**
+     * Resolves a client supplied file name inside the owning user's directory.
+     *
+     * The name is sanitized and the resolved path is verified to stay inside
+     * that directory, so a name such as "../../../evil.txt" cannot escape it.
+     */
+    private Path resolveUserFile(Long userId, String fileName) throws IOException {
         Path userDir = basePath.resolve("users").resolve(userId.toString());
         Files.createDirectories(userDir);
 
-        String storedFileName = fileId + "_" + sanitizedName;
-        Path target = userDir.resolve(storedFileName).normalize();
+        Path target = userDir.resolve(sanitizeFilename(fileName)).normalize();
 
         if (!target.startsWith(userDir)) {
             throw new InvalidFileException("Invalid file path");
         }
 
-        file.transferTo(target);
+        return target;
+    }
 
+    public String toStoragePath(Path target) {
         return basePath.relativize(target).toString().replace("\\", "/");
+    }
+
+    /**
+     * Directory holding the not yet assembled chunks of an upload session.
+     *
+     * The uploadId is server generated, so unlike a file name it needs no
+     * sanitizing.
+     */
+    public Path tempChunkDir(String uploadId) {
+        return basePath.resolve("temp").resolve(uploadId);
     }
 
     public Resource loadAsResource(String storagePath) throws IOException {
@@ -110,15 +146,37 @@ public class LocalFileStorageService {
     }
 
 
+    /**
+     * Checks a declared content type against the allow list and returns it in
+     * its bare, comparable form.
+     *
+     * A client may legitimately send parameters such as
+     * "text/plain; charset=UTF-8", which must not fail the allow list, and the
+     * stored value should not carry them either.
+     *
+     * This is the client's claim about the bytes, not proof: it is not verified
+     * against the file's actual content.
+     */
+    public String normalizeContentType(String contentType) {
+        if (contentType == null || contentType.isBlank()) {
+            throw new InvalidFileException("contentType is required");
+        }
+
+        String normalized = contentType.split(";")[0].trim().toLowerCase(Locale.ROOT);
+
+        if (!ALLOWED_CONTENT_TYPES.contains(normalized)) {
+            throw new InvalidFileException("File type not allowed. Supported: PDF, images, TXT, DOCX");
+        }
+
+        return normalized;
+    }
+
     private void validateFile(MultipartFile file) {
         if (file == null || file.isEmpty()) {
             throw new InvalidFileException("File is empty");
         }
 
-        String contentType = file.getContentType();
-        if (contentType == null || !ALLOWED_CONTENT_TYPES.contains(contentType)) {
-            throw new InvalidFileException("File type not allowed. Supported: PDF, images, TXT, DOCX");
-        }
+        normalizeContentType(file.getContentType());
     }
 
     private String sanitizeFilename(String filename) {

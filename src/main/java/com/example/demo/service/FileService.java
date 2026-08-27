@@ -3,13 +3,16 @@ package com.example.demo.service;
 import com.example.demo.DTOs.FileResponseDTO;
 import com.example.demo.DTOs.InitUploadRequest;
 import com.example.demo.DTOs.InitUploadResponse;
+import com.example.demo.DTOs.UploadStatusResponseDTO;
 import com.example.demo.entities.FileMetadata;
 import com.example.demo.entities.UploadSession;
 import com.example.demo.entities.User;
 import com.example.demo.enums.UploadStatus;
 import com.example.demo.exception.FileNotFoundException;
 import com.example.demo.exception.InvalidFileException;
+import com.example.demo.exception.UploadConflictException;
 import com.example.demo.repositories.FileRepository;
+import com.example.demo.repositories.UploadChunkRepository;
 import com.example.demo.repositories.UploadSessionRepository;
 import com.example.demo.repositories.UserRepository;
 import com.example.demo.security.CustomUserDetails;
@@ -25,9 +28,13 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
+import java.util.stream.IntStream;
 import com.example.demo.DTOs.DownloadInfoResponseDTO;
 import com.example.demo.exception.InvalidFileException;
 import org.springframework.http.MediaType;
@@ -47,103 +54,319 @@ public class FileService {
     @Autowired
     private LocalFileStorageService localFileStorageService;
 
-@Autowired
-private UploadSessionRepository repository;
+    @Autowired
+    private UploadChunkRepository uploadChunkRepository;
 
-        public InitUploadResponse createSession(Long userId, InitUploadRequest request) {
+    public InitUploadResponse createSession(Long userId, InitUploadRequest request) {
 
-            UploadSession session = new UploadSession();
+        validateInitRequest(request);
 
-            session.setUploadId(UUID.randomUUID().toString());
-            session.setUserId(userId);
-            session.setFileName(request.getFileName());
-            session.setTotalChunks(request.getTotalChunks());
-            session.setUploadedChunks(0);
-            session.setStatus(UploadStatus.IN_PROGRESS);
+        UploadSession session = new UploadSession();
 
-            repository.save(session);
+        session.setUploadId(UUID.randomUUID().toString());
+        session.setFileId(UUID.randomUUID());
+        session.setUserId(userId);
+        session.setFileName(request.getFileName());
+        session.setContentType(
+                localFileStorageService.normalizeContentType(request.getContentType()));
+        session.setTotalChunks(request.getTotalChunks());
+        session.setTotalSize(request.getTotalSize());
+        session.setChunkSize(request.getChunkSize());
+        session.setStatus(UploadStatus.IN_PROGRESS);
 
-            return new InitUploadResponse(
-                    session.getUploadId()
-            );
-        }
+        uploadSessionRepository.save(session);
+
+        return new InitUploadResponse(
+                session.getUploadId()
+        );
+    }
 
     public void uploadChunk(String uploadId, Integer chunkNumber, MultipartFile chunk) throws IOException {
 
-        UploadSession session = uploadSessionRepository.findById(uploadId).orElseThrow();
+        UploadSession session = getOwnedSession(uploadId);
+        requireSizedSession(session);
 
-        Path chunkDir = Paths.get("uploads")
-                        .resolve("temp")
-                        .resolve(uploadId);
+        if (session.getStatus() != UploadStatus.IN_PROGRESS) {
+            throw new InvalidFileException(
+                    "Upload session is not accepting chunks: " + session.getStatus());
+        }
 
+        if (chunkNumber == null || chunkNumber < 1 || chunkNumber > session.getTotalChunks()) {
+            throw new InvalidFileException(
+                    "chunkNumber must be between 1 and " + session.getTotalChunks());
+        }
+
+        // a chunk of the wrong size means a truncated or mis-sliced transfer,
+        // and is the only chance to notice it while the client can still retry
+        long expectedSize = expectedChunkSize(session, chunkNumber);
+        if (chunk.getSize() != expectedSize) {
+            throw new InvalidFileException(
+                    "chunk " + chunkNumber + " must be " + expectedSize
+                            + " bytes but was " + chunk.getSize());
+        }
+
+        Path chunkDir = localFileStorageService.tempChunkDir(uploadId);
         Files.createDirectories(chunkDir);
 
-        Path chunkPath =
-                chunkDir.resolve(
-                        chunkNumber + ".part"
-                );
+        Path chunkPath = chunkDir.resolve(chunkNumber + ".part");
 
-        chunk.transferTo(chunkPath);
+        // the scratch name is unique per request, not per chunk: two requests
+        // for the same chunk would otherwise write over each other's transfer
+        // and one of them would publish the other's half written bytes
+        Path scratchPath = chunkDir.resolve(chunkNumber + ".part." + UUID.randomUUID());
 
-        session.setUploadedChunks(session.getUploadedChunks() + 1);
+        // transfer into a scratch name and swap it in, so a transfer that dies
+        // half way cannot leave a truncated .part behind for assembly to use
+        try {
+            chunk.transferTo(scratchPath);
 
-        uploadSessionRepository.save(session);
+            Files.move(scratchPath, chunkPath,
+                    StandardCopyOption.REPLACE_EXISTING,
+                    StandardCopyOption.ATOMIC_MOVE);
+        } finally {
+            Files.deleteIfExists(scratchPath);
+        }
+
+        int recorded = uploadChunkRepository.record(uploadId, chunkNumber, expectedSize);
+
+        log.debug("Chunk stored. uploadId={} chunkNumber={} newRecord={}",
+                uploadId, chunkNumber, recorded == 1);
     }
 
     public FileResponseDTO completeUpload(String uploadId) throws IOException {
 
-        UploadSession session =
-                uploadSessionRepository.findById(uploadId)
-                        .orElseThrow();
+        UploadSession session = getOwnedSession(uploadId);
+        requireSizedSession(session);
 
-        if (!session.getUploadedChunks()
-                .equals(session.getTotalChunks())) {
-            throw new RuntimeException("Chunks missing");
+        // a client retrying after a timed out /complete must get the same file
+        // back, not a second copy of it
+        if (session.getStatus() == UploadStatus.COMPLETED) {
+            return fileRepository.findById(session.getFileId())
+                    .map(this::toDto)
+                    .orElseThrow(() -> new FileNotFoundException("Completed file not found"));
         }
 
-        Path tempDir = Paths.get("uploads/temp/" + uploadId);
+        if (session.getStatus() == UploadStatus.ASSEMBLING) {
+            throw new UploadConflictException(
+                    "Upload is already being assembled, poll the status endpoint");
+        }
 
-        Path finalDir = Paths.get("uploads/users/" + session.getUserId());
-        Files.createDirectories(finalDir);
+        if (session.getStatus() != UploadStatus.IN_PROGRESS) {
+            throw new InvalidFileException(
+                    "Upload session cannot be completed: " + session.getStatus());
+        }
 
-        Path finalFile = finalDir.resolve(session.getFileName());
+        // chunk numbers are validated on the way in and unique per session, so
+        // a full count means the set is exactly 1..totalChunks
+        long received = uploadChunkRepository.countByUploadId(uploadId);
+        if (received != session.getTotalChunks()) {
+            throw new InvalidFileException(
+                    "Upload incomplete: " + received + " of "
+                            + session.getTotalChunks() + " chunks received");
+        }
 
-        try (OutputStream out = Files.newOutputStream(finalFile)) {
+        // the status read above is only a fast path with a clear message; this
+        // claim is the actual gate, because two requests can both pass the read
+        if (uploadSessionRepository.claimForAssembly(uploadId) != 1) {
+            throw new UploadConflictException(
+                    "Upload is already being assembled, poll the status endpoint");
+        }
+        session.setStatus(UploadStatus.ASSEMBLING);
 
-            for (int i = 1; i <= session.getTotalChunks(); i++) {
+        Path tempDir = localFileStorageService.tempChunkDir(uploadId);
 
-                Path chunk = tempDir.resolve(i + ".part");
+        // fileName comes from the client, so resolve it through the storage
+        // service which sanitizes it, prefixes the fileId so uploads of the
+        // same name cannot collide, and keeps it inside the user's directory
+        Path finalFile = localFileStorageService.resolveStoredFile(
+                session.getUserId(),
+                session.getFileId(),
+                session.getFileName()
+        );
+
+        // unique per attempt, so a scratch file left behind by a killed attempt
+        // is never truncated and republished by the next one
+        Path scratchFile = finalFile.resolveSibling(
+                finalFile.getFileName() + "." + UUID.randomUUID() + ".tmp");
+
+        try {
+            assembleChunks(session, tempDir, scratchFile);
+
+            long assembledSize = Files.size(scratchFile);
+            if (assembledSize != session.getTotalSize()) {
+                throw new InvalidFileException(
+                        "Assembled file is " + assembledSize + " bytes but "
+                                + session.getTotalSize() + " was declared");
+            }
+
+            // only now does the verified content take the real file name
+            Files.move(scratchFile, finalFile,
+                    StandardCopyOption.REPLACE_EXISTING,
+                    StandardCopyOption.ATOMIC_MOVE);
+
+        } catch (IOException | RuntimeException failure) {
+            Files.deleteIfExists(scratchFile);
+
+            session.setStatus(UploadStatus.FAILED);
+            uploadSessionRepository.save(session);
+
+            log.warn("Upload assembly failed. uploadId={} reason={}",
+                    uploadId, failure.getMessage());
+            throw failure;
+        }
+
+        FileMetadata metadata = new FileMetadata();
+        metadata.setId(session.getFileId());
+        metadata.setUser(userRepository.getReferenceById(session.getUserId()));
+        metadata.setOriginalFileName(session.getFileName());
+        metadata.setStoragePath(localFileStorageService.toStoragePath(finalFile));
+        metadata.setContentType(session.getContentType());
+        metadata.setSizeBytes(session.getTotalSize());
+
+        FileMetadata saved = fileRepository.save(metadata);
+
+        session.setStatus(UploadStatus.COMPLETED);
+        uploadSessionRepository.save(session);
+
+        // drop the chunks only once the file and its metadata are durable, so a
+        // crash before this point leaves a session that can still be completed
+        FileSystemUtils.deleteRecursively(tempDir);
+        uploadChunkRepository.deleteByUploadId(uploadId);
+
+        log.info("Chunked upload completed. userId={} fileId={} sizeBytes={}",
+                session.getUserId(), saved.getId(), saved.getSizeBytes());
+
+        return toDto(saved);
+    }
+
+    /**
+     * Reports which chunks of a session are still outstanding.
+     *
+     * This is what lets an interrupted client resume: it sends only the
+     * missing chunks instead of the whole file again.
+     */
+    public UploadStatusResponseDTO getUploadStatus(String uploadId) {
+
+        UploadSession session = getOwnedSession(uploadId);
+        requireSizedSession(session);
+
+        List<Integer> missingChunks;
+        long receivedChunks;
+
+        if (session.getStatus() == UploadStatus.COMPLETED) {
+            // the chunk records are dropped on completion, nothing is missing
+            missingChunks = List.of();
+            receivedChunks = session.getTotalChunks();
+        } else {
+            Set<Integer> received =
+                    new HashSet<>(uploadChunkRepository.findChunkNumbers(uploadId));
+
+            missingChunks = IntStream.rangeClosed(1, session.getTotalChunks())
+                    .filter(chunkNumber -> !received.contains(chunkNumber))
+                    .boxed()
+                    .toList();
+
+            receivedChunks = received.size();
+        }
+
+        return UploadStatusResponseDTO.builder()
+                .uploadId(session.getUploadId())
+                .fileName(session.getFileName())
+                .status(session.getStatus())
+                .totalChunks(session.getTotalChunks())
+                .chunkSize(session.getChunkSize())
+                .totalSize(session.getTotalSize())
+                .receivedChunks(receivedChunks)
+                .missingChunks(missingChunks)
+                .build();
+    }
+
+    /**
+     * Concatenates the stored chunks in order into {@code target}.
+     *
+     * Every chunk is checked against the size the session declares for it, so
+     * a chunk that went missing or was damaged on disk fails the upload here
+     * instead of producing a silently corrupt file.
+     */
+    private void assembleChunks(UploadSession session, Path tempDir, Path target) throws IOException {
+
+        try (OutputStream out = Files.newOutputStream(target,
+                StandardOpenOption.CREATE,
+                StandardOpenOption.TRUNCATE_EXISTING,
+                StandardOpenOption.WRITE)) {
+
+            for (int chunkNumber = 1; chunkNumber <= session.getTotalChunks(); chunkNumber++) {
+
+                Path chunk = tempDir.resolve(chunkNumber + ".part");
+
+                if (!Files.exists(chunk)) {
+                    throw new InvalidFileException(
+                            "Chunk " + chunkNumber + " is missing from disk");
+                }
+
+                long expectedSize = expectedChunkSize(session, chunkNumber);
+                long actualSize = Files.size(chunk);
+
+                if (actualSize != expectedSize) {
+                    throw new InvalidFileException(
+                            "Chunk " + chunkNumber + " is " + actualSize
+                                    + " bytes on disk but should be " + expectedSize);
+                }
 
                 Files.copy(chunk, out);
             }
         }
+    }
 
-        // cleanup temp
-        FileSystemUtils.deleteRecursively(tempDir);
+    /** Size chunk {@code chunkNumber} must have, the last one being shorter. */
+    private long expectedChunkSize(UploadSession session, int chunkNumber) {
+        long offset = (long) (chunkNumber - 1) * session.getChunkSize();
+        return Math.min(session.getChunkSize(), session.getTotalSize() - offset);
+    }
 
-        // save metadata
-        FileMetadata metadata = new FileMetadata();
-        metadata.setId(UUID.randomUUID());
-        metadata.setUser(userRepository.getReferenceById(session.getUserId()));
-        metadata.setOriginalFileName(session.getFileName());
-        metadata.setStoragePath("users/" + session.getUserId() + "/" + session.getFileName());
-//        metadata.setStoragePath(finalFile.toString());
-        metadata.setSizeBytes(Files.size(finalFile));
+    private void validateInitRequest(InitUploadRequest request) {
 
-        fileRepository.save(metadata);
+        if (request.getFileName() == null || request.getFileName().isBlank()) {
+            throw new InvalidFileException("fileName is required");
+        }
+        if (request.getContentType() == null || request.getContentType().isBlank()) {
+            throw new InvalidFileException("contentType is required");
+        }
+        if (request.getTotalSize() == null || request.getTotalSize() < 1) {
+            throw new InvalidFileException("totalSize must be >= 1");
+        }
+        if (request.getChunkSize() == null || request.getChunkSize() < 1) {
+            throw new InvalidFileException("chunkSize must be >= 1");
+        }
+        if (request.getTotalChunks() == null || request.getTotalChunks() < 1) {
+            throw new InvalidFileException("totalChunks must be >= 1");
+        }
 
-        // update session
-        session.setStatus(UploadStatus.COMPLETED);
-        uploadSessionRepository.save(session);
+        // ceil without floating point, which loses precision on large files
+        long expectedChunks =
+                (request.getTotalSize() + request.getChunkSize() - 1) / request.getChunkSize();
 
-            return FileResponseDTO.builder()
-                    .fileId(metadata.getId())
-                    .originalFileName(metadata.getOriginalFileName())
-                    .contentType(metadata.getContentType())
-                    .sizeBytes(metadata.getSizeBytes())
-                    .uploadedAt(metadata.getCreatedAt())
-                    .build();
+        if (expectedChunks != request.getTotalChunks()) {
+            throw new InvalidFileException(
+                    "totalChunks must be " + expectedChunks
+                            + " for totalSize=" + request.getTotalSize()
+                            + " and chunkSize=" + request.getChunkSize());
+        }
+    }
 
+    /**
+     * Rejects sessions created before size tracking existed, whose chunks
+     * cannot be validated or assembled safely.
+     */
+    private void requireSizedSession(UploadSession session) {
+        if (session.getFileId() == null
+                || session.getTotalSize() == null
+                || session.getChunkSize() == null
+                || session.getTotalChunks() == null) {
+
+            throw new InvalidFileException(
+                    "Upload session is missing size information, please start a new upload");
+        }
     }
     public FileResponseDTO upload(MultipartFile file) throws IOException {
         CustomUserDetails currentUser = getCurrentUser();
@@ -158,7 +381,8 @@ private UploadSessionRepository repository;
         metadata.setUser(user);
         metadata.setOriginalFileName(file.getOriginalFilename());
         metadata.setStoragePath(storagePath);
-        metadata.setContentType(file.getContentType());
+        metadata.setContentType(
+                localFileStorageService.normalizeContentType(file.getContentType()));
         metadata.setSizeBytes(file.getSize());
 
         FileMetadata saved = fileRepository.save(metadata);
@@ -250,6 +474,27 @@ private UploadSessionRepository repository;
         Long userId = getCurrentUser().getUserId();
         return fileRepository.findByIdAndUser_Id(fileId, userId)
                 .orElseThrow(() -> new FileNotFoundException("File not found"));
+    }
+
+    /**
+     * Loads an upload session that belongs to the current user.
+     *
+     * A session owned by somebody else is reported as not found rather than
+     * forbidden, so callers cannot probe for existing upload ids.
+     */
+    private UploadSession getOwnedSession(String uploadId) {
+        Long userId = getCurrentUser().getUserId();
+
+        UploadSession session = uploadSessionRepository.findById(uploadId)
+                .orElseThrow(() -> new FileNotFoundException("Upload session not found"));
+
+        if (!userId.equals(session.getUserId())) {
+            log.warn("Upload session access denied. uploadId={} ownerId={} callerId={}",
+                    uploadId, session.getUserId(), userId);
+            throw new FileNotFoundException("Upload session not found");
+        }
+
+        return session;
     }
 
     private CustomUserDetails getCurrentUser() {

@@ -3,6 +3,7 @@ package com.example.demo.controller;
 import com.example.demo.DTOs.FileResponseDTO;
 import com.example.demo.DTOs.InitUploadRequest;
 import com.example.demo.DTOs.InitUploadResponse;
+import com.example.demo.DTOs.UploadStatusResponseDTO;
 import com.example.demo.entities.FileMetadata;
 import com.example.demo.security.CustomUserDetails;
 import com.example.demo.service.FileService;
@@ -67,6 +68,13 @@ public class FileController {
         );
 
         return ResponseEntity.ok().build();
+    }
+
+    @GetMapping("/{uploadId}/status")
+    public ResponseEntity<UploadStatusResponseDTO> uploadStatus(
+            @PathVariable String uploadId
+    ) {
+        return ResponseEntity.ok(fileService.getUploadStatus(uploadId));
     }
 
     @PostMapping("/{uploadId}/complete")

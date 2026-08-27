@@ -4,6 +4,7 @@ package com.example.demo.exceptionHandler;
 import com.example.demo.exception.FileNotFoundException;
 import com.example.demo.exception.InvalidCredentialsException;
 import com.example.demo.exception.InvalidFileException;
+import com.example.demo.exception.UploadConflictException;
 import com.example.demo.exception.UserAlreadyExistsException;
 import com.example.demo.response.AuthResponse;
 import lombok.extern.slf4j.Slf4j;
@@ -42,6 +43,12 @@ public class GlobalExceptionHandler {
     public ResponseEntity<AuthResponse> handleInvalidFileException(InvalidFileException ex) {
         log.warn("Invalid file: {}", ex.getMessage());
         return new ResponseEntity<>(new AuthResponse(ex.getMessage()), HttpStatus.BAD_REQUEST);
+    }
+
+    @ExceptionHandler(UploadConflictException.class)
+    public ResponseEntity<AuthResponse> handleUploadConflictException(UploadConflictException ex) {
+        log.warn("Upload conflict: {}", ex.getMessage());
+        return new ResponseEntity<>(new AuthResponse(ex.getMessage()), HttpStatus.CONFLICT);
     }
 
     @ExceptionHandler(RuntimeException.class)
