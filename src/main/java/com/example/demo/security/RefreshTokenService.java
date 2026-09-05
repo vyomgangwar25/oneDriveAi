@@ -1,5 +1,6 @@
 package com.example.demo.security;
 
+import com.example.demo.exception.InvalidCredentialsException;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -27,19 +28,28 @@ public class RefreshTokenService {
 
     public Long validateRefreshToken(String token) {
 
+        // a caller with no refresh cookie at all reaches here with null, and
+        // ConcurrentHashMap rejects a null key outright
+        if (token == null) {
+            throw new InvalidCredentialsException("Missing refresh token");
+        }
+
         TokenData data = tokenStore.get(token);
 
         if (data == null || data.getExpiry() < System.currentTimeMillis()) {
 
             tokenStore.remove(token);
 
-            throw new RuntimeException("Invalid refresh token");
+            throw new InvalidCredentialsException("Invalid or expired refresh token");
         }
 
         return data.getUserId();
     }
 
     public void revokeToken(String token) {
+        if (token == null) {
+            return;
+        }
         tokenStore.remove(token);
     }
 

@@ -93,7 +93,9 @@ public class SecurityConfig {
                         // Public APIs
                         .requestMatchers(
                                 "/auth/signup",
-                                "/auth/login","/auth/refresh"
+                                "/auth/login",
+                                "/auth/refresh",
+                                "/auth/logout"
                         ).permitAll()
 
                         // Secure everything else

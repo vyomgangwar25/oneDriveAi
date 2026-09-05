@@ -48,11 +48,39 @@ private CookieService cookieService;
     }
 
     @PostMapping("/login")
-    public ResponseEntity<LoginResponseDTO> login(@RequestBody LoginRequestDTO request) {
+    public ResponseEntity<LoginResponseDTO> login(
+            @RequestBody LoginRequestDTO request,
+            HttpServletResponse httpResponse) {
+
         LoginResponseDTO response = authService.login(request);
+
+        // the refresh token leaves the server only as an HttpOnly cookie, so
+        // that a reload can silently re-authenticate without the token ever
+        // being reachable from JavaScript
+        cookieService.addRefreshCookie(
+                httpResponse,
+                response.getRefreshToken()
+        );
+
         return ResponseEntity
                 .status(HttpStatus.OK)
                 .body(response);
+    }
+
+    @PostMapping("/logout")
+    public ResponseEntity<AuthResponse> logout(
+            @CookieValue(name = "refresh_token", required = false) String refreshToken,
+            HttpServletResponse response) {
+
+        // revoking is what actually ends the session; clearing the cookie alone
+        // would leave a still-valid token in the store
+        if (refreshToken != null) {
+            refreshTokenService.revokeToken(refreshToken);
+        }
+
+        cookieService.clearRefreshCookie(response);
+
+        return ResponseEntity.ok(new AuthResponse("Logout successful"));
     }
 
 
