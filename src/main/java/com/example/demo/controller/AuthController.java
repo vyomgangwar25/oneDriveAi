@@ -74,9 +74,12 @@ private CookieService cookieService;
         String accessToken = jwtService.generateToken(user);
 
         return ResponseEntity.ok(
-                new LoginResponseDTO("access_token",
-                        accessToken,"token refreshed successfully"
-                )
+                LoginResponseDTO.builder()
+                        .message("token refreshed successfully")
+                        .accessToken(accessToken)
+                        .username(user.getUsername())
+                        .email(user.getEmail())
+                        .build()
         );
     }
 

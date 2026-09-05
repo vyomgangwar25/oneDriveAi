@@ -87,7 +87,13 @@ public class AuthServiceImpl implements AuthService {
         String refreshToken=refreshTokenService.createRefreshToken(user.getId());
         log.info("Login successful. userId={} email={}", user.getId(), user.getEmail());
 
-        return new LoginResponseDTO("Login successful",token,refreshToken);
+        return LoginResponseDTO.builder()
+                .message("Login successful")
+                .accessToken(token)
+                .refreshToken(refreshToken)
+                .username(user.getUsername())
+                .email(user.getEmail())
+                .build();
     }
 
 }
