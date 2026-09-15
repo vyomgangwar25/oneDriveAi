@@ -6,6 +6,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
 import org.springframework.security.config.Customizer;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
@@ -97,6 +98,12 @@ public class SecurityConfig {
                                 "/auth/refresh",
                                 "/auth/logout"
                         ).permitAll()
+
+                        // Reached by browser navigation, which cannot send an
+                        // Authorization header. The signed, short lived token in
+                        // the query string authorizes it instead, and the
+                        // endpoint verifies that token itself.
+                        .requestMatchers(HttpMethod.GET, "/files/*/download").permitAll()
 
                         // Secure everything else
                         .anyRequest().authenticated()

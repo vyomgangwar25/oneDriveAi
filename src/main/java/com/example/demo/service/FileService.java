@@ -21,6 +21,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.io.Resource;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.FileSystemUtils;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -409,11 +410,49 @@ public class FileService {
         return getOwnedFile(fileId);
     }
 
-    public void delete(UUID fileId) throws IOException {
+    /**
+     * Same ownership check as {@link #getOwnedFile}, for callers that have no
+     * SecurityContext to read the user from.
+     *
+     * The token authorized download link is one: it is reached without the JWT
+     * filter having authenticated anybody, and the user id comes out of the
+     * link's own token instead.
+     */
+    public FileMetadata getFileForUser(UUID fileId, Long userId) {
+        return fileRepository.findByIdAndUser_Id(fileId, userId)
+                .orElseThrow(() -> new FileNotFoundException("File not found"));
+    }
+
+    /** Opens the stored file as a streamable resource. */
+    public Resource loadResource(FileMetadata metadata) throws IOException {
+        return localFileStorageService.loadAsResource(metadata.getStoragePath());
+    }
+
+
+    @Transactional
+    public void delete(UUID fileId) {
         FileMetadata metadata = getOwnedFile(fileId);
-        localFileStorageService.delete(metadata.getStoragePath());
+
+        // read off the entity before it is removed from the persistence context
+        Long userId = metadata.getUser().getId();
+        String storagePath = metadata.getStoragePath();
+
         fileRepository.delete(metadata);
-        log.info("File deleted. userId={} fileId={}", metadata.getUser().getId(), fileId);
+
+        // without this the DELETE would be held back until the transaction
+        // commits, which is after the bytes below are already gone
+        fileRepository.flush();
+
+        try {
+            localFileStorageService.delete(storagePath);
+        } catch (IOException failure) {
+            // the file is unreachable either way now that its row is gone, so
+            // the caller's delete did succeed; the bytes are a cleanup concern
+            log.warn("File row deleted but the file itself could not be removed. fileId={} storagePath={}",
+                    fileId, storagePath, failure);
+        }
+
+        log.info("File deleted. userId={} fileId={}", userId, fileId);
     }
 
     public DownloadInfoResponseDTO getDownloadInfo(UUID fileId) {
