@@ -13,6 +13,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.Resource;
 import org.springframework.core.io.support.ResourceRegion;
+import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.ContentDisposition;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpRange;
@@ -26,10 +27,12 @@ import org.springframework.web.util.UriComponentsBuilder;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.UUID;
 import com.example.demo.DTOs.DownloadInfoResponseDTO;
 import com.example.demo.DTOs.DownloadTokenResponseDTO;
+import com.example.demo.DTOs.PageResponseDTO;
 
 @RestController
 @RequestMapping("/files")
@@ -109,9 +112,21 @@ public class FileController {
         return ResponseEntity.status(HttpStatus.CREATED).body(response);
     }
 
+    /**
+     * One page of the caller's files, newest first.
+     *
+     * @param since optional ISO date time; only files uploaded after it are
+     *              returned, which is how the recent view filters without
+     *              pulling every page down first
+     */
     @GetMapping
-    public ResponseEntity<List<FileResponseDTO>> listFiles() {
-        return ResponseEntity.ok(fileService.listUserFiles());
+    public ResponseEntity<PageResponseDTO<FileResponseDTO>> listFiles(
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "20") int size,
+            @RequestParam(required = false)
+            @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime since
+    ) {
+        return ResponseEntity.ok(fileService.listUserFiles(page, size, since));
     }
     @GetMapping("/{id}/download/info")
     public ResponseEntity<DownloadInfoResponseDTO> downloadInfo(@PathVariable UUID id) {

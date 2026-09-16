@@ -3,6 +3,7 @@ package com.example.demo.service;
 import com.example.demo.DTOs.FileResponseDTO;
 import com.example.demo.DTOs.InitUploadRequest;
 import com.example.demo.DTOs.InitUploadResponse;
+import com.example.demo.DTOs.PageResponseDTO;
 import com.example.demo.DTOs.UploadStatusResponseDTO;
 import com.example.demo.entities.FileMetadata;
 import com.example.demo.entities.UploadSession;
@@ -19,6 +20,10 @@ import com.example.demo.security.CustomUserDetails;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.io.Resource;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -31,6 +36,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
+import java.time.LocalDateTime;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -393,12 +399,41 @@ public class FileService {
     }
 
 
-    public List<FileResponseDTO> listUserFiles() {
+    /** Largest page a caller may ask for, so one request cannot pull the lot. */
+    private static final int MAX_PAGE_SIZE = 100;
+
+    /**
+     * One page of the current user's files, newest first.
+     *
+     * @param since when given, only files uploaded after this point are counted,
+     *              which is what the recent view asks for
+     */
+    public PageResponseDTO<FileResponseDTO> listUserFiles(int page, int size, LocalDateTime since) {
+
         Long userId = getCurrentUser().getUserId();
-        return fileRepository.findByUser_IdOrderByCreatedAtDesc(userId)
-                .stream()
-                .map(this::toDto)
-                .toList();
+
+        int safePage = Math.max(page, 0);
+        int safeSize = Math.min(Math.max(size, 1), MAX_PAGE_SIZE);
+
+        // id is the tie breaker: created_at has second precision, so two files
+        // uploaded in the same second could otherwise swap places between two
+        // requests and a row would repeat on one page and vanish from another
+        Pageable pageable = PageRequest.of(safePage, safeSize,
+                Sort.by(Sort.Direction.DESC, "createdAt")
+                        .and(Sort.by(Sort.Direction.DESC, "id")));
+
+        Page<FileMetadata> found = (since == null)
+                ? fileRepository.findByUser_Id(userId, pageable)
+                : fileRepository.findByUser_IdAndCreatedAtAfter(userId, since, pageable);
+
+        return PageResponseDTO.<FileResponseDTO>builder()
+                .content(found.getContent().stream().map(this::toDto).toList())
+                .page(found.getNumber())
+                .size(found.getSize())
+                .totalElements(found.getTotalElements())
+                .totalPages(found.getTotalPages())
+                .hasNext(found.hasNext())
+                .build();
     }
 
     public Resource download(UUID fileId) throws IOException {

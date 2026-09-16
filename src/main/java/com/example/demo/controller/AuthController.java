@@ -11,6 +11,7 @@ import com.example.demo.security.JwtService;
 import com.example.demo.security.RefreshTokenService;
 import com.example.demo.service.AuthServiceImpl;
 import jakarta.servlet.http.HttpServletResponse;
+import jakarta.validation.Valid;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
@@ -38,7 +39,7 @@ public class AuthController {
 private CookieService cookieService;
 
     @PostMapping("/signup")
-    public ResponseEntity<AuthResponse> signup(@RequestBody SignupRequestDTO request) {
+    public ResponseEntity<AuthResponse> signup(@Valid @RequestBody SignupRequestDTO request) {
 
         AuthResponse response = authService.signup(request);
 
@@ -49,7 +50,7 @@ private CookieService cookieService;
 
     @PostMapping("/login")
     public ResponseEntity<LoginResponseDTO> login(
-            @RequestBody LoginRequestDTO request,
+            @Valid @RequestBody LoginRequestDTO request,
             HttpServletResponse httpResponse) {
 
         LoginResponseDTO response = authService.login(request);

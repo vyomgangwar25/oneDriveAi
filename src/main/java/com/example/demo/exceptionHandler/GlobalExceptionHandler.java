@@ -10,6 +10,8 @@ import com.example.demo.response.AuthResponse;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.validation.FieldError;
+import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
@@ -49,6 +51,26 @@ public class GlobalExceptionHandler {
     public ResponseEntity<AuthResponse> handleUploadConflictException(UploadConflictException ex) {
         log.warn("Upload conflict: {}", ex.getMessage());
         return new ResponseEntity<>(new AuthResponse(ex.getMessage()), HttpStatus.CONFLICT);
+    }
+
+    /**
+     * Reports a failed @Valid in the same {message} shape as every other error
+     * here, so the client can show it without special casing.
+     *
+     * Without this the catch all handler below would turn a bad request into
+     * a 500.
+     */
+    @ExceptionHandler(MethodArgumentNotValidException.class)
+    public ResponseEntity<AuthResponse> handleValidationException(MethodArgumentNotValidException ex) {
+
+        String message = ex.getBindingResult().getFieldErrors().stream()
+                .map(FieldError::getDefaultMessage)
+                .findFirst()
+                .orElse("Invalid request");
+
+        log.warn("Validation failed: {}", message);
+
+        return new ResponseEntity<>(new AuthResponse(message), HttpStatus.BAD_REQUEST);
     }
 
     @ExceptionHandler(RuntimeException.class)
